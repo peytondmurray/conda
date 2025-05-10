@@ -3,13 +3,22 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest import mock
 
 import pytest
 
 import conda
 from conda.base.context import context, reset_context
+from conda.common.compat import NoneType
+from conda.common.configuration import (
+    ParameterLoader,
+    PrimitiveParameter,
+    SequenceParameter,
+)
 from conda.core.package_cache_data import PackageCacheData
 from conda.gateways.connection.session import CondaSession, get_session
 from conda.plugins.hookspec import CondaSpecs
@@ -20,7 +29,8 @@ from . import TEST_RECIPES_CHANNEL, http_test_server
 
 if TYPE_CHECKING:
     import http.server
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
+    from typing import Callable
 
     from pytest_mock import MockerFixture
 
@@ -146,3 +156,57 @@ def clear_package_cache() -> Iterable[None]:
     yield
 
     PackageCacheData.clear()
+
+
+@pytest.fixture
+def mock_context_attributes() -> Callable:
+    """A fixture that returns a context manager for mocking the context.
+
+    This can be used to mock attributes quickly:
+
+        with mock_context_attributes(
+            pkg_env_layout=pkg_env_layout,
+            _pkgs_dirs=(pkgs,),
+            _envs_dirs=(envs,),
+        ):
+            ...
+
+    This context manager will iterate through each kwarg, patching each
+    of the keys with the given value, and then resetting the context.
+    Most simple ``Context`` attributes are handled automatically.
+    """
+
+    @contextmanager
+    def mock_attribute(**kwargs) -> Iterator:
+        with ExitStack() as stack:
+            for key, value in kwargs.items():
+                if isinstance(value, ParameterLoader):
+                    param = value
+                elif isinstance(value, (str, NoneType)):
+                    param = ParameterLoader(
+                        PrimitiveParameter(value, element_type=(str, NoneType))
+                    )
+                elif isinstance(value, Enum):
+                    param = ParameterLoader(PrimitiveParameter(value))
+                elif isinstance(value, tuple):
+                    param = ParameterLoader(
+                        SequenceParameter(
+                            PrimitiveParameter("", element_type=str),
+                            value,
+                        )
+                    )
+                elif isinstance(value, bool):
+                    param = ParameterLoader(PrimitiveParameter(value))
+                else:
+                    raise NotImplementedError
+
+                param._set_name(key)
+                stack.enter_context(
+                    mock.patch(
+                        f"conda.base.context.Context.{key}",
+                        new=param,
+                    )
+                )
+            yield
+
+    return mock_attribute

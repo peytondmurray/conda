@@ -25,12 +25,12 @@ from conda.base.context import (
     channel_alias_validation,
     context,
     default_python_validation,
-    get_plugin_config_data,
     reset_context,
     validate_channels,
     validate_prefix_name,
 )
-from conda.common.configuration import Configuration, ValidationError, YamlRawParameter
+from conda.common.compat import on_win
+from conda.common.configuration import ValidationError, YamlRawParameter
 from conda.common.path import expand, win_path_backout
 from conda.common.serialize import yaml_round_trip_load
 from conda.common.url import join_url, path_to_url
@@ -43,7 +43,6 @@ from conda.exceptions import (
 from conda.gateways.disk.permissions import make_read_only
 from conda.models.channel import Channel
 from conda.models.match_spec import MatchSpec
-from conda.utils import on_win
 
 if TYPE_CHECKING:
     from pytest import MonkeyPatch
@@ -349,29 +348,30 @@ def test_default_target_is_root_prefix(testdata: None):
 def test_target_prefix(
     path_factory: PathFactoryFixture,
     monkeypatch: MonkeyPatch,
+    mock_context_attributes,
 ) -> None:
     (envs1 := path_factory()).mkdir()
     (envs2 := path_factory()).mkdir()
     envs_dirs = (str(envs1), str(envs2))
 
-    monkeypatch.setenv("CONDA_ENVS_DIRS", os.pathsep.join(envs_dirs))
-    reset_context()
-    assert context._envs_dirs == envs_dirs
-    assert context.envs_dirs[:2] == envs_dirs
+    with mock_context_attributes(_envs_dirs=envs_dirs):
+        reset_context()
+        assert context._envs_dirs == envs_dirs
+        assert context.envs_dirs[:2] == envs_dirs
 
-    # with both dirs writable, choose first
-    reset_context(argparse_args=SimpleNamespace(name="blarg"))
-    assert context.target_prefix == str(envs1 / "blarg")
+        # with both dirs writable, choose first
+        reset_context(argparse_args=SimpleNamespace(name="blarg"))
+        assert context.target_prefix == str(envs1 / "blarg")
 
-    # with first dir read-only, choose second
-    make_read_only(envs1 / ".conda_envs_dir_test")
-    reset_context(argparse_args=SimpleNamespace(name="blarg"))
-    assert context.target_prefix == str(envs2 / "blarg")
+        # with first dir read-only, choose second
+        make_read_only(envs1 / ".conda_envs_dir_test")
+        reset_context(argparse_args=SimpleNamespace(name="blarg"))
+        assert context.target_prefix == str(envs2 / "blarg")
 
-    # if first dir is read-only but environment exists, choose first
-    (envs1 / "blarg").mkdir()
-    reset_context(argparse_args=SimpleNamespace(name="blarg"))
-    assert context.target_prefix == str(envs1 / "blarg")
+        # if first dir is read-only but environment exists, choose first
+        (envs1 / "blarg").mkdir()
+        reset_context(argparse_args=SimpleNamespace(name="blarg"))
+        assert context.target_prefix == str(envs1 / "blarg")
 
 
 def test_aggressive_update_packages(monkeypatch: MonkeyPatch) -> None:
@@ -689,80 +689,6 @@ def test_validate_prefix_name(prefix, allow_base, mock_return_values, expected):
             assert actual == str(expected)
 
 
-def test_get_plugin_config_data_file_source(tmp_path):
-    """
-    Test file source of plugin configuration values
-    """
-    condarc = tmp_path / "condarc"
-
-    condarc.write_text(
-        dals(
-            """
-            plugins:
-              option_one: value_one
-              option_two: value_two
-            """
-        )
-    )
-
-    config_data = {
-        path: data for path, data in Configuration._load_search_path((condarc,))
-    }
-
-    plugin_config_data = get_plugin_config_data(config_data)
-
-    assert plugin_config_data.get(condarc) is not None
-
-    option_one = plugin_config_data.get(condarc).get("option_one")
-    assert option_one is not None
-    assert option_one.value(None) == "value_one"
-
-    option_two = plugin_config_data.get(condarc).get("option_two")
-    assert option_two is not None
-    assert option_two.value(None) == "value_two"
-
-
-def test_get_plugin_config_data_env_var_source():
-    """
-    Test environment variable source of plugin configuration values
-    """
-    raw_data = {
-        "envvars": {
-            "plugins_option_one": {"_raw_value": "value_one"},
-            "plugins_option_two": {"_raw_value": "value_two"},
-        }
-    }
-
-    plugin_config_data = get_plugin_config_data(raw_data)
-
-    assert plugin_config_data.get("envvars") is not None
-
-    option_one = plugin_config_data.get("envvars").get("option_one")
-    assert option_one is not None
-    assert option_one.get("_raw_value") == "value_one"
-
-    option_two = plugin_config_data.get("envvars").get("option_two")
-    assert option_two is not None
-    assert option_two.get("_raw_value") == "value_two"
-
-
-def test_get_plugin_config_data_skip_bad_values():
-    """
-    Make sure that values that are not frozendict for file sources are skipped
-    """
-    path = Path("/tmp/")
-
-    class Value:
-        def value(self, _):
-            return "some_value"
-
-    raw_data = {path: {"plugins": Value()}}
-
-    plugin_config_data = get_plugin_config_data(raw_data)
-
-    assert plugin_config_data == {}
-
-
 @pytest.mark.parametrize(
     "value,expected",
     (
@@ -881,3 +807,146 @@ def test_check_allowlist_and_denylist(monkeypatch: MonkeyPatch):
 
     validate_channels(("defaults",))
     validate_channels((DEFAULT_CHANNELS[0], DEFAULT_CHANNELS[1]))
+
+
+@pytest.mark.parametrize(
+    "pkgs_dirs_set",
+    [True, False],
+)
+@pytest.mark.parametrize("on_win", [True, False])
+@pytest.mark.parametrize("force_32bit", [True, False])
+def test_pkgs_matrix(
+    force_32bit,
+    on_win,
+    pkgs_dirs_set,
+    mock_context_attributes,
+    tmp_path,
+):
+    if pkgs_dirs_set:
+        pkgs_dirs = ["my_pkgs/"]
+    else:
+        pkgs_dirs = []
+
+    pkgs_dirs = tuple(str(item) for item in pkgs_dirs)
+    with (
+        mock_context_attributes(
+            _pkgs_dirs=pkgs_dirs,
+            force_32bit=force_32bit,
+        ),
+        mock.patch("conda.base.context.on_win", on_win),
+        mock.patch("conda.base.context.user_data_dir") as mock_user_data_dir,
+    ):
+        mock_user_data_dir.return_value = "my_user_data"
+        result = context.pkgs_dirs
+
+    root_prefix = Path(context.root_prefix)
+    rewritten = []
+    for path in result:
+        try:
+            rewritten.append(
+                "<root_prefix>/" + str(Path(path).relative_to(root_prefix))
+            )
+            continue
+        except ValueError:
+            pass
+
+        if "my_user_data" in path:
+            newpath = path[path.find("my_user_data") :].replace(
+                "my_user_data", "<user_data>"
+            )
+            rewritten.append(newpath)
+            continue
+
+        rewritten.append("~/" + str(Path(path).relative_to(Path.home())))
+
+    fpath = Path("context_pkgs_dirs_result.md")
+    if not fpath.exists():
+        with open(fpath, "w") as f:
+            f.write("| pkgs_dirs_set | on_win | force_32bit | context.pkgs_dirs |\n")
+            f.write("| --- | --- | --- | --- |\n")
+
+    with open(fpath, "a") as f:
+        f.write("|")
+        f.write(
+            "|".join(
+                [
+                    str(pkgs_dirs_set),
+                    str(on_win),
+                    str(force_32bit),
+                    str(tuple(rewritten)),
+                ]
+            )
+        )
+        f.write("|\n")
+
+
+@pytest.mark.parametrize(
+    "envs_dirs_set",
+    [True, False],
+)
+@pytest.mark.parametrize("on_win", [True, False])
+@pytest.mark.parametrize("root_writable", [True, False])
+def test_envs_matrix(
+    root_writable,
+    on_win,
+    envs_dirs_set,
+    mock_context_attributes,
+    tmp_path,
+):
+    if envs_dirs_set:
+        envs_dirs = ["my_envs/"]
+    else:
+        envs_dirs = []
+
+    envs_dirs = tuple(str(item) for item in envs_dirs)
+    with (
+        mock_context_attributes(
+            _envs_dirs=envs_dirs,
+        ),
+        mock.patch("conda.base.context.Context.root_writable", root_writable),
+        mock.patch("conda.base.context.on_win", on_win),
+        mock.patch("conda.base.context.user_data_dir") as mock_user_data_dir,
+    ):
+        mock_user_data_dir.return_value = "my_user_data"
+        result = context.envs_dirs
+
+    root_prefix = Path(context.root_prefix)
+    rewritten = []
+    for path in result:
+        try:
+            rewritten.append(
+                "<root_prefix>/" + str(Path(path).relative_to(root_prefix))
+            )
+            continue
+        except ValueError:
+            pass
+
+        if "my_user_data" in path:
+            rewritten.append(
+                path[path.find("my_user_data") :].replace("my_user_data", "<user_data>")
+            )
+            continue
+
+        rewritten.append("~/" + str(Path(path).relative_to(Path.home())))
+
+    fpath = Path("context_envs_dirs_result.md")
+    if not fpath.exists():
+        with open(fpath, "w") as f:
+            f.write(
+                "|  envs_dirs_set |  on_win | root_writable | context.envs_dirs |\n"
+            )
+            f.write("| --- | --- | --- | --- |\n")
+
+    with open(fpath, "a") as f:
+        f.write("|")
+        f.write(
+            "|".join(
+                [
+                    str(envs_dirs_set),
+                    str(on_win),
+                    str(root_writable),
+                    str(tuple(rewritten)),
+                ]
+            )
+        )
+        f.write("|\n")
