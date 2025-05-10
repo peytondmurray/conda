@@ -1253,3 +1253,187 @@ def test_envs(
                         assert USER_DATA_ENVS in result
                     else:
                         assert USER_DATA_ENVS not in result
+
+
+@pytest.mark.parametrize(
+    "pkgs_in_root_prefix",
+    [True, False],
+)
+@pytest.mark.parametrize(
+    "pkgs_dirs_set",
+    [True, False],
+)
+@pytest.mark.parametrize(
+    "pkg_env_layout",
+    [
+        PkgEnvLayout.USER,
+        PkgEnvLayout.CONDA_ROOT,
+        PkgEnvLayout.UNSET,
+    ],
+)
+@pytest.mark.parametrize("on_win", [True, False])
+@pytest.mark.parametrize("force_32bit", [True, False])
+def test_pkgs_matrix(
+    force_32bit,
+    on_win,
+    pkg_env_layout,
+    pkgs_dirs_set,
+    pkgs_in_root_prefix,
+    mock_context_attributes,
+    tmp_path,
+):
+    if pkgs_dirs_set:
+        pkgs_dirs = ["my_pkgs/"]
+    else:
+        pkgs_dirs = []
+
+    pkgs_dirs = tuple(str(item) for item in pkgs_dirs)
+    with (
+        mock_context_attributes(
+            _pkgs_dirs=pkgs_dirs,
+            pkg_env_layout=pkg_env_layout,
+            force_32bit=force_32bit,
+        ),
+        mock.patch("conda.base.context.on_win", on_win),
+        mock.patch("conda.base.context.Context._pkgs_in_root_prefix") as mock_pkgs,
+        mock.patch("conda.base.context.USER_DATA_DIR", "my_user_data"),
+        mock.patch("conda.base.context.USER_DATA_ENVS", "my_user_data/envs"),
+    ):
+        mock_pkgs.return_value = ["foo.conda"] if pkgs_in_root_prefix else []
+        result = context.pkgs_dirs
+
+    root_prefix = Path(context.root_prefix)
+    rewritten = []
+    for path in result:
+        try:
+            rewritten.append(
+                "<root_prefix>/" + str(Path(path).relative_to(root_prefix))
+            )
+            continue
+        except ValueError:
+            pass
+
+        if "my_user_data" in path:
+            rewritten.append(
+                path[path.find("my_user_data") :].replace("my_user_data", "<user_data>")
+            )
+            continue
+
+        rewritten.append("~/" + str(Path(path).relative_to(Path.home())))
+
+    fpath = Path("context_pkgs_dirs_result.md")
+    if not fpath.exists():
+        with open(fpath, "w") as f:
+            f.write(
+                "| pkgs_in_root_prefix | pkgs_dirs_set | pkg_env_layout | on_win | force_32bit | context.pkgs_dirs |\n"
+            )
+            f.write("| --- | --- | --- | --- | --- | --- |\n")
+
+    with open(fpath, "a") as f:
+        f.write("|")
+        f.write(
+            "|".join(
+                [
+                    str(pkgs_in_root_prefix),
+                    str(pkgs_dirs_set),
+                    str(pkg_env_layout),
+                    str(on_win),
+                    str(force_32bit),
+                    str(tuple(rewritten)),
+                ]
+            )
+        )
+        f.write("|\n")
+
+
+@pytest.mark.parametrize(
+    "envs_in_root_prefix",
+    [True, False],
+)
+@pytest.mark.parametrize(
+    "envs_dirs_set",
+    [True, False],
+)
+@pytest.mark.parametrize(
+    "pkg_env_layout",
+    [
+        PkgEnvLayout.USER,
+        PkgEnvLayout.CONDA_ROOT,
+        PkgEnvLayout.UNSET,
+    ],
+)
+@pytest.mark.parametrize("on_win", [True, False])
+@pytest.mark.parametrize("root_writable", [True, False])
+def test_envs_matrix(
+    root_writable,
+    on_win,
+    pkg_env_layout,
+    envs_dirs_set,
+    envs_in_root_prefix,
+    mock_context_attributes,
+    propagate_conda_logger,
+    caplog,
+    tmp_path,
+):
+    if envs_dirs_set:
+        envs_dirs = ["my_envs/"]
+    else:
+        envs_dirs = []
+
+    envs_dirs = tuple(str(item) for item in envs_dirs)
+    with (
+        mock_context_attributes(
+            _envs_dirs=envs_dirs,
+            pkg_env_layout=pkg_env_layout,
+        ),
+        mock.patch("conda.base.context.Context.root_writable", root_writable),
+        mock.patch("conda.base.context.on_win", on_win),
+        mock.patch("conda.base.context.Context._envs_in_root_prefix") as mock_envs,
+        mock.patch("conda.base.context.USER_DATA_DIR", "my_user_data"),
+        mock.patch("conda.base.context.USER_DATA_ENVS", "my_user_data/envs"),
+    ):
+        mock_envs.return_value = ["foo/"] if envs_in_root_prefix else []
+        result = context.envs_dirs
+
+    root_prefix = Path(context.root_prefix)
+    rewritten = []
+    for path in result:
+        try:
+            rewritten.append(
+                "<root_prefix>/" + str(Path(path).relative_to(root_prefix))
+            )
+            continue
+        except ValueError:
+            pass
+
+        if "my_user_data" in path:
+            rewritten.append(
+                path[path.find("my_user_data") :].replace("my_user_data", "<user_data>")
+            )
+            continue
+
+        rewritten.append("~/" + str(Path(path).relative_to(Path.home())))
+
+    fpath = Path("context_envs_dirs_result.md")
+    if not fpath.exists():
+        with open(fpath, "w") as f:
+            f.write(
+                "| envs_in_root_prefix | envs_dirs_set | pkg_env_layout | on_win | root_writable | context.envs_dirs |\n"
+            )
+            f.write("| --- | --- | --- | --- | --- | --- |\n")
+
+    with open(fpath, "a") as f:
+        f.write("|")
+        f.write(
+            "|".join(
+                [
+                    str(envs_in_root_prefix),
+                    str(envs_dirs_set),
+                    str(pkg_env_layout),
+                    str(on_win),
+                    str(root_writable),
+                    str(tuple(rewritten)),
+                ]
+            )
+        )
+        f.write("|\n")
